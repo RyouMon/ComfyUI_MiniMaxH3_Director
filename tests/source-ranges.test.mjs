@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 const source = await readFile(new URL("../web/js/minimax_source_ranges.js", import.meta.url), "utf8");
-const { sourceSegmentRangeLimits, setSourceSegmentRange, moveSourceSplit } =
+const { sourceSegmentRangeLimits, setSourceSegmentRange, moveSourceSplit, sourceSegmentFrameRange } =
     await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`);
 
 function fixture() {
@@ -51,7 +51,7 @@ test("dragging clamps both ways and rounds to whole frames", () => {
     assertCoverage(moveSourceSplit(segments, 30, 200).segments);
 });
 
-test("UI inclusive range maps to exact source frames, with no end-frame loss", () => {
+test("range helper maps to exact source frames, with no end-frame loss", () => {
     const result = setSourceSegmentRange(fixture(), 1, 35, 65);
     assert.deepEqual(result.map((s) => [s.start, s.length]), [[0, 34], [34, 31], [65, 25]]);
     assert.equal(result[1].start + 1, 35);
@@ -110,4 +110,22 @@ test("an unchanged range retains exact coverage and metadata", () => {
     const segments = fixture();
     assert.deepEqual(setSourceSegmentRange(segments, 1, 31, 60), segments);
     assertCoverage(moveSourceSplit(segments, 30, 30).segments);
+});
+
+test("displayed ranges assign every cut frame once and include the final frame", () => {
+    const segments = moveSourceSplit(fixture(), 30, 42).segments;
+    const display = segments.map((s) => sourceSegmentFrameRange(s, 90));
+    assert.deepEqual(display.map((s) => s.label), ["[1,43)", "[43,61)", "[61,90]"]);
+    const included = display.flatMap((range) => {
+        const stop = range.last + (range.endInclusive ? 1 : 0);
+        return Array.from({ length: stop - range.first }, (_, i) => range.first + i);
+    });
+    assert.deepEqual(included, Array.from({ length: 90 }, (_, i) => i + 1));
+    assert.equal(display[1].first, display[0].last);
+});
+
+test("a single segment includes both source endpoints", () => {
+    assert.deepEqual(sourceSegmentFrameRange({ start: 0, length: 4 }, 4), {
+        first: 1, last: 4, endInclusive: true, label: "[1,4]",
+    });
 });

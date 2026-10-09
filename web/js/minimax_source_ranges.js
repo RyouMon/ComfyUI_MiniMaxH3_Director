@@ -1,4 +1,12 @@
-/** Source-video ranges use 0-based start + length; UI frame ranges are inclusive. */
+/** Stored source ranges use 0-based start + length, without duplicate cut frames. */
+export function sourceSegmentFrameRange(segment, totalFrames) {
+    const first = segment.start + 1;
+    const end = segment.start + segment.length;
+    const endInclusive = end === totalFrames;
+    const last = end + (endInclusive ? 0 : 1);
+    return { first, last, endInclusive, label: `[${first},${last}${endInclusive ? "]" : ")"}` };
+}
+
 export function sourceSegmentRangeLimits(segments, index, lockedFrames = [], minLength = 4) {
     const ordered = segments.map((segment, i) => ({ segment, index: i }))
         .sort((a, b) => a.segment.start - b.segment.start);

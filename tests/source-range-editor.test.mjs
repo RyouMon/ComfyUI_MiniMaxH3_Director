@@ -5,6 +5,9 @@ import vm from "node:vm";
 
 const helperSource = await readFile(new URL("../web/js/minimax_source_ranges.js", import.meta.url), "utf8");
 const helpers = await import(`data:text/javascript;base64,${Buffer.from(helperSource).toString("base64")}`);
+const i18nSource = await readFile(new URL("../web/js/minimax_i18n.js", import.meta.url), "utf8");
+const i18n = await import(`data:text/javascript;base64,${Buffer.from(i18nSource).toString("base64")}`);
+i18n.setLocale("zh");
 const timelineSource = await readFile(new URL("../web/js/minimax_timeline.js", import.meta.url), "utf8");
 const classStart = timelineSource.indexOf("class MiniMaxH3DirectorEditor {");
 const classEnd = timelineSource.indexOf("\nfunction ", classStart);
@@ -13,21 +16,18 @@ const document = { activeElement: null };
 const Editor = vm.runInNewContext(`${timelineSource.slice(classStart, classEnd)}\nMiniMaxH3DirectorEditor;`, {
     ...helpers, document, MIN_SEG: 4, HANDLE_PX: 14, RULER_H: 24, TRACK_Y: 44, TRACK_H: 160,
     stopDomEvent() {}, clamp: (value, min, max) => Math.max(min, Math.min(max, value)),
-    t: (key, vars = {}) => `${key}:${JSON.stringify(vars)}`,
+    t: i18n.t, resolveTaskKey: (key) => key,
+    taskUsesReferenceVideo: () => false, taskUsesReferenceImages: () => false,
+    taskUsesReferenceAudios: () => false,
 });
 
 function editorFixture() {
     const elements = new Map();
-    for (const name of ["range-first", "range-last", "range-error", "range-segment-label", "split-edit-hint"]) {
+    for (const name of ["split-edit-hint"]) {
         elements.set(`[data-r="${name}"]`, { value: "", textContent: "", disabled: false });
     }
-    for (const name of ["apply-segment-range", "del-split"]) elements.set(`[data-a="${name}"]`, { disabled: false });
-    const bar = {
-        dataset: {}, classList: { toggle(name, on) { bar.hidden = on; } },
-        querySelector: (selector) => elements.get(selector),
-    };
+    elements.set('[data-a="del-split"]', { disabled: false });
     const splitBar = { classList: { toggle() {}, add() {} } };
-    elements.set('[data-r="segment-range-bar"]', bar);
     elements.set('[data-r="split-edit-bar"]', splitBar);
     const editor = Object.create(Editor.prototype);
     Object.assign(editor, {
@@ -38,7 +38,8 @@ function editorFixture() {
         root: { querySelector: (selector) => elements.get(selector) },
         selectedIndex: 0, selectedSplitFrame: null, currentFrame: 0,
         _drag: null, _edgeSnapshot: null, _previewSegments: null, commits: 0,
-        seekBar: { value: 0 }, boundsEl: { textContent: "" }, segInfo: null,
+        seekBar: { value: 0 }, boundsEl: { textContent: "" }, segInfo: { textContent: "" },
+        getFrameRate: () => 24, getTaskKey: () => "rv2v", getVideoClips: () => [],
         isFl2vMode: () => false, isGenMode: () => false, isImageBatch: () => false,
         isR2vBatch: () => false, isGlobalMode: () => true,
         usesBatchTimeline: () => false, needsSourceVideoUpload: () => false,
@@ -48,25 +49,24 @@ function editorFixture() {
         getMousePos: (e) => ({ x: e.x, y: e.y }),
         scheduleRender() {}, updateOutputPreview() {}, setSmartSplitMessage() {},
         updateSegmentContinuityUI() {},
-        updateSelectionUI() { this.updateSegmentRangeUI(); },
+        updateSelectionUI() { this._updateSegInfoFromSegment(this.timeline.segments[this.selectedIndex]); },
         _updateTimelineDom() { this.updateSplitPointUI(); },
         commit() { this.commits++; this.normalizeSegments(); this.updateSelectionUI(); },
     });
-    return { editor, elements, bar };
+    return { editor, elements };
 }
 
 function mouse(x) { return { button: 0, x, y: 180, preventDefault() {} }; }
 function ranges(editor) { return Array.from(editor.timeline.segments, (s) => `${s.start}:${s.length}`).join(","); }
 
 test("the real split mouse handlers preview and commit without deleting either segment", () => {
-    const { editor, elements } = editorFixture();
+    const { editor } = editorFixture();
     assert.equal(editor.hitTest(300, 180).type, "split");
     editor.onMouseDown(mouse(300));
     assert.equal(editor._drag.kind, "split");
     editor.onMouseMove(mouse(420));
     assert.equal(ranges(editor), "0:30,30:30,60:30", "drag is still a preview");
     assert.equal(editor.selectedSplitFrame, 42);
-    assert.equal(elements.get('[data-r="range-first"]').value, "43");
     editor.onMouseUp();
     assert.equal(ranges(editor), "0:42,42:18,60:30");
     assert.equal(editor.commits, 1);
@@ -91,56 +91,24 @@ test("a click still selects/toggles the split without committing a range change"
     assert.equal(ranges(editor), "0:30,30:30,60:30");
 });
 
-test("typed endpoints survive redraw/focus changes and apply atomically", () => {
-    const { editor, elements, bar } = editorFixture();
-    editor.selectedIndex = 1;
-    editor.updateSegmentRangeUI();
-    const first = elements.get('[data-r="range-first"]');
-    const last = elements.get('[data-r="range-last"]');
-    first.value = "41";
-    last.value = "66";
-    bar.dataset.dirty = "true";
-    document.activeElement = last;
-    editor.updateSegmentRangeUI();
-    assert.equal(first.value, "41");
-    document.activeElement = null;
-    editor.applySelectedSegmentRange();
-    assert.equal(ranges(editor), "0:40,40:26,66:24");
-    assert.equal(bar.dataset.dirty, "false");
-    assert.equal(first.value, "41");
-    assert.equal(last.value, "66");
-    assert.equal(editor.commits, 1);
+test("source metadata states which cut frame is excluded and includes the final frame", () => {
+    const { editor } = editorFixture();
+    editor.isGlobalMode = () => false;
+    editor._updateSegInfoFromSegment(editor.timeline.segments[0]);
+    assert.match(editor.segInfo.textContent, /\[1,31\).*包含第1帧，不包含第31帧.*30f/);
+    editor._updateSegInfoFromSegment(editor.timeline.segments[2]);
+    assert.match(editor.segInfo.textContent, /\[61,90\].*包含第61帧，包含第90帧.*30f/);
 });
 
-test("invalid ranges report an error, retain drafts, and leave source coverage unchanged", () => {
-    const { editor, elements, bar } = editorFixture();
-    editor.selectedIndex = 1;
-    editor.updateSegmentRangeUI();
-    elements.get('[data-r="range-first"]').value = "60";
-    elements.get('[data-r="range-last"]').value = "61";
-    bar.dataset.dirty = "true";
-    editor.applySelectedSegmentRange();
-    assert.match(elements.get('[data-r="range-error"]').textContent, /range.invalid/);
-    assert.equal(editor.commits, 0);
-    assert.equal(ranges(editor), "0:30,30:30,60:30");
-    editor.selectedIndex = 2;
-    editor.updateSegmentRangeUI();
-    assert.equal(elements.get('[data-r="range-first"]').value, "61");
-    assert.equal(elements.get('[data-r="range-error"]').textContent, "");
-    assert.equal(bar.dataset.dirty, "false");
-});
-
-test("source endpoint fields are disabled and other director modes hide the range bar", () => {
-    const { editor, elements, bar } = editorFixture();
-    editor.updateSegmentRangeUI();
-    assert.equal(elements.get('[data-r="range-first"]').disabled, true);
-    assert.equal(elements.get('[data-r="range-last"]').disabled, false);
-    for (const mode of ["isFl2vMode", "isGenMode", "isImageBatch"]) {
-        editor[mode] = () => true;
-        editor.updateSegmentRangeUI();
-        assert.equal(bar.hidden, true);
-        editor.applySelectedSegmentRange();
-        assert.equal(editor.commits, 0);
-        editor[mode] = () => false;
-    }
+test("dragging refreshes metadata to match the new boundary without changing coverage", () => {
+    const { editor } = editorFixture();
+    editor.isGlobalMode = () => false;
+    editor.onMouseDown(mouse(300));
+    editor.onMouseMove(mouse(420));
+    assert.match(editor.segInfo.textContent, /\[43,61\).*包含第43帧，不包含第61帧.*18f/);
+    editor.onMouseUp();
+    assert.match(editor.segInfo.textContent, /\[43,61\).*18f/);
+    assert.equal(ranges(editor), "0:42,42:18,60:30");
+    editor._updateSegInfoFromSegment(editor.timeline.segments[0]);
+    assert.match(editor.segInfo.textContent, /\[1,43\).*不包含第43帧.*42f/);
 });
