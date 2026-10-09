@@ -1,5 +1,6 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
+import { moveSourceSplit, setSourceSegmentRange, sourceSegmentRangeLimits } from "./minimax_source_ranges.js";
 import {
     CUSTOM_ASPECT_RATIO,
     DEFAULT_ASPECT_RATIO,
@@ -1135,6 +1136,12 @@ const STYLES = `
 .bd-btn-danger:hover{background:#4a1515;border-color:#c44;color:#faa}
 .bd-split-edit-bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;width:100%;box-sizing:border-box;padding:6px 10px;margin:0 0 4px;background:#241818;border:1px solid #633;border-radius:6px}
 .bd-split-edit-bar.hidden{display:none!important}
+.bd-seg-range{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:6px 10px;margin-bottom:4px;border:1px solid #444;border-radius:6px;font-size:11px}
+.bd-seg-range.hidden{display:none!important}
+.bd-seg-range label{display:flex;align-items:center;gap:4px}
+.bd-seg-range .bd-num{width:76px}
+.bd-seg-range .bd-range-note{color:#aaa}
+.bd-seg-range .bd-range-error{color:#f88}
 .bd-split-edit-bar .bd-split-edit-hint{flex:1;min-width:140px;font-size:11px;line-height:1.35;color:#f88}
 .bd-btn-del-split{background:#3a2020;border-color:#e66;color:#f88}
 .bd-btn-del-split:hover{background:#4a1515;border-color:#f88;color:#fcc}
@@ -2944,6 +2951,18 @@ class MiniMaxH3DirectorEditor {
         this.splitEditBarEl = splitEditBar;
         this.splitEditHintEl = splitEditBar.querySelector('[data-r="split-edit-hint"]');
 
+        const segmentRangeBar = document.createElement("div");
+        segmentRangeBar.className = "bd-seg-range hidden";
+        segmentRangeBar.setAttribute("data-r", "segment-range-bar");
+        segmentRangeBar.innerHTML = `
+            <b data-r="range-segment-label"></b>
+            <label><span data-i18n="range.firstFrame">起始帧</span><input type="number" class="bd-num" data-r="range-first" min="1" step="1"></label>
+            <label><span data-i18n="range.lastFrame">结束帧</span><input type="number" class="bd-num" data-r="range-last" min="1" step="1"></label>
+            <button type="button" class="bd-btn" data-a="apply-segment-range" data-i18n="range.apply">应用范围</button>
+            <span class="bd-range-note" data-i18n="range.inclusive">从第1帧计数，含首尾帧；相邻段同步调整</span>
+            <span class="bd-range-error" data-r="range-error"></span>`;
+        this.mainBody.appendChild(segmentRangeBar);
+
         this.viewport = document.createElement("div");
         this.viewport.className = "bd-viewport";
         this.canvas = document.createElement("canvas");
@@ -3435,6 +3454,20 @@ class MiniMaxH3DirectorEditor {
         bind('[data-a="equal"]', () => this.equalSplit());
         bind('[data-a="smart-split"]', () => { void this.smartSplit(); });
         bind('[data-a="del-split"]', () => this.deleteSelectedSplitPoint());
+        bind('[data-a="apply-segment-range"]', () => this.applySelectedSegmentRange());
+        for (const input of this.root.querySelectorAll('[data-r="range-first"], [data-r="range-last"]')) {
+            input.addEventListener("keydown", (e) => {
+                e.stopPropagation();
+                if (e.key === "Enter") {
+                    e.preventDefault();
+                    this.applySelectedSegmentRange();
+                }
+            });
+            input.addEventListener("input", () => {
+                this.root.querySelector('[data-r="segment-range-bar"]').dataset.dirty = "true";
+                this.root.querySelector('[data-r="range-error"]').textContent = "";
+            });
+        }
         bind('[data-a="run-select-toggle"]', () => this.toggleRunSelectMode());
         bind('[data-a="video-duplicate"]', () => this.duplicateSelectedVideoSegment());
         bind('[data-a="video-group-prev"]', () => this.stepSelectedGroup(-1));
@@ -3823,14 +3856,14 @@ class MiniMaxH3DirectorEditor {
             const hit = this.hitTest(x, y);
             this.canvas.classList.remove("bd-grab");
             if (hit?.type === "run-check" || hit?.type === "split" || hit?.type === "continuity-joint") {
-                this.canvas.style.cursor = "pointer";
+                this.canvas.style.cursor = hit.type === "split" ? "ew-resize" : "pointer";
                 if (hit.type === "continuity-joint") {
                     this.canvas.title = t(
                         hit.on ? "tooltip.continuityJointOn" : "tooltip.continuityJointOff",
                         { a: hit.a, b: hit.b },
                     );
                 } else {
-                    this.canvas.title = "";
+                    this.canvas.title = hit.type === "split" ? t("range.dragSplit") : "";
                 }
             } else if (hit?.type === "edge") {
                 // Edge drag is always horizontal (change start/length); keep ↔ cursor.
@@ -9390,7 +9423,8 @@ class MiniMaxH3DirectorEditor {
             this._drag = null;
         } else if (hit.type === "split") {
             this.selectSplitFrame(hit.frame);
-            this._drag = null;
+            this._drag = { kind: "split", frame: hit.frame, x0: x };
+            this._edgeSnapshot = this.timeline.segments.map((segment) => ({ ...segment }));
         } else if (hit.type === "segment") {
             if (this.isFl2vMode() && hit.index !== this.selectedIndex) {
                 flushFl2vPromptDraft(this);
@@ -9450,6 +9484,15 @@ class MiniMaxH3DirectorEditor {
 
         if (this._drag.kind === "playhead") {
             this.currentFrame = frame;
+        } else if (this._drag.kind === "split") {
+            if (!this._drag.moved && Math.abs(x - this._drag.x0) < 3) return;
+            const result = moveSourceSplit(this._edgeSnapshot, this._drag.frame, frame, this.getClipBoundaries(), MIN_SEG);
+            if (!result) return;
+            this._drag.moved = true;
+            this._previewSegments = result.segments;
+            this.selectedSplitFrame = result.frame;
+            this.selectedIndex = result.index;
+            this._syncLiveDurationUiFromPreview();
         } else if (this._drag.kind === "reorder") {
             this._drag.pointerX = x;
             this._drag.pointerY = y;
@@ -9615,7 +9658,7 @@ class MiniMaxH3DirectorEditor {
             }
         } else {
             info = t("segment.infoRange", {
-                start: seg.start,
+                start: seg.start + 1,
                 end: seg.start + seg.length,
                 length: seg.length,
                 sec: (seg.length / fps).toFixed(2),
@@ -9653,7 +9696,13 @@ class MiniMaxH3DirectorEditor {
     }
 
     onMouseUp() {
-        if (
+        if (this._drag?.kind === "split" && this._previewSegments) {
+            this.timeline.segments = this._previewSegments;
+            this._previewSegments = null;
+            this.root.querySelector('[data-r="segment-range-bar"]').dataset.dirty = "false";
+            this.commit();
+            this.setSmartSplitMessage("");
+        } else if (
             (this._drag?.kind === "edge" || this._drag?.kind === "fl2v-move")
             && this._previewSegments
         ) {
@@ -9847,7 +9896,7 @@ class MiniMaxH3DirectorEditor {
         }).filter((r) => r.end > r.start);
     }
 
-    /** Interior segment boundaries that can be selected/deleted (not clip seams). */
+    /** Interior segment boundaries that can be moved/deleted (not clip seams). */
     getEditableSplitFrames() {
         if (this.isFl2vMode() || this.isGenMode() || this.isImageBatch()) return [];
         const total = this.getTotalFrames();
@@ -9889,6 +9938,7 @@ class MiniMaxH3DirectorEditor {
     }
 
     updateSplitPointUI() {
+        this.updateSegmentRangeUI();
         const bar = this.splitEditBarEl || this.root?.querySelector('[data-r="split-edit-bar"]');
         const hint = this.splitEditHintEl || this.root?.querySelector('[data-r="split-edit-hint"]');
         const btn = this.root?.querySelector('[data-a="del-split"]');
@@ -9900,17 +9950,73 @@ class MiniMaxH3DirectorEditor {
             && this.getEditableSplitFrames().includes(this.selectedSplitFrame);
         if (bar) bar.classList.toggle("hidden", !has);
         if (hint && has) {
-            hint.textContent = t("split.hintSelected", { f: this.selectedSplitFrame });
+            hint.textContent = t("split.hintSelected", { f: this.selectedSplitFrame + 1 });
         }
         if (btn) {
             btn.disabled = !has;
             btn.title = has
-                ? t("split.tooltipDelete", { f: this.selectedSplitFrame })
+                ? t("split.tooltipDelete", { f: this.selectedSplitFrame + 1 })
                 : t("split.tooltipSelectFirst");
         }
         if (has && this.boundsEl) {
-            this.boundsEl.textContent = t("split.boundsSelected", { f: this.selectedSplitFrame });
+            this.boundsEl.textContent = t("split.boundsSelected", { f: this.selectedSplitFrame + 1 });
         }
+    }
+
+    updateSegmentRangeUI() {
+        const bar = this.root?.querySelector('[data-r="segment-range-bar"]');
+        if (!bar) return;
+        const sourceMode = !this.isFl2vMode() && !this.isGenMode() && !this.isImageBatch();
+        const segments = this._previewSegments || this.timeline.segments || [];
+        const limits = sourceMode
+            ? sourceSegmentRangeLimits(segments, this.selectedIndex, this.getClipBoundaries(), MIN_SEG)
+            : null;
+        bar.classList.toggle("hidden", !limits);
+        if (!limits) return;
+        bar.querySelector('[data-r="range-segment-label"]').textContent = t("range.segment", { n: this.selectedIndex + 1 });
+        const first = bar.querySelector('[data-r="range-first"]');
+        const last = bar.querySelector('[data-r="range-last"]');
+        const keepDraft = bar.dataset.dirty === "true" && this._drag?.kind !== "split";
+        for (const [input, value, min, max, enabled] of [
+            [first, limits.start + 1, limits.firstMin, limits.firstMax, limits.canStart],
+            [last, limits.end, limits.lastMin, limits.lastMax, limits.canEnd],
+        ]) {
+            if (!keepDraft && document.activeElement !== input) input.value = String(value);
+            input.min = String(min);
+            input.max = String(max);
+            input.disabled = !enabled;
+            input.title = enabled ? t("range.editable") : t("range.locked");
+        }
+        bar.querySelector('[data-a="apply-segment-range"]').disabled = !limits.canStart && !limits.canEnd;
+        const id = limits.segment.id ?? this.selectedIndex;
+        if (bar.dataset.segmentId !== String(id)) {
+            bar.dataset.segmentId = String(id);
+            bar.dataset.dirty = "false";
+            bar.querySelector('[data-r="range-error"]').textContent = "";
+            first.value = String(limits.start + 1);
+            last.value = String(limits.end);
+        }
+    }
+
+    applySelectedSegmentRange() {
+        if (this.isFl2vMode() || this.isGenMode() || this.isImageBatch() || this._drag) return;
+        const first = this.root.querySelector('[data-r="range-first"]');
+        const last = this.root.querySelector('[data-r="range-last"]');
+        const error = this.root.querySelector('[data-r="range-error"]');
+        const updated = setSourceSegmentRange(this.timeline.segments, this.selectedIndex,
+            first.value === "" ? NaN : Number(first.value), last.value === "" ? NaN : Number(last.value),
+            this.getClipBoundaries(), MIN_SEG);
+        if (!updated) {
+            error.textContent = t("range.invalid", { n: MIN_SEG });
+            return;
+        }
+        error.textContent = "";
+        this.root.querySelector('[data-r="segment-range-bar"]').dataset.dirty = "false";
+        this.timeline.segments = updated;
+        this.selectedSplitFrame = null;
+        this.commit();
+        this.updateSplitPointUI();
+        this.setSmartSplitMessage("");
     }
 
     deleteSelectedSplitPoint() {
@@ -11106,7 +11212,7 @@ class MiniMaxH3DirectorEditor {
         if (this.seekBar) this.seekBar.max = Math.max(0, totalFrames - 1);
         if (this.selectedSplitFrame != null && this.getEditableSplitFrames().includes(this.selectedSplitFrame)) {
             if (this.boundsEl) {
-                this.boundsEl.textContent = t("split.boundsEditable", { f: this.selectedSplitFrame });
+                this.boundsEl.textContent = t("split.boundsEditable", { f: this.selectedSplitFrame + 1 });
             }
         } else {
             const seg = segs[this.selectedIndex];
@@ -11158,6 +11264,7 @@ class MiniMaxH3DirectorEditor {
     formatTime(frames) { return (frames / this.getFrameRate()).toFixed(2); }
 
     updateSelectionUI() {
+        this.updateSegmentRangeUI();
         this.timeline.global = this.timeline.global || { taskType: "", prompt: "", refs: [] };
         if (this.globalTask) this.globalTask.value = this.timeline.global.taskType || "";
         if (this.globalPrompt) this.globalPrompt.value = this.timeline.global.prompt || "";
