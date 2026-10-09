@@ -95,9 +95,9 @@ test("source metadata states which cut frame is excluded and includes the final 
     const { editor } = editorFixture();
     editor.isGlobalMode = () => false;
     editor._updateSegInfoFromSegment(editor.timeline.segments[0]);
-    assert.match(editor.segInfo.textContent, /\[1,31\).*包含第1帧，不包含第31帧.*30f/);
+    assert.match(editor.segInfo.textContent, /帧 1-31 \(30f\) \(不包含末尾帧\)/);
     editor._updateSegInfoFromSegment(editor.timeline.segments[2]);
-    assert.match(editor.segInfo.textContent, /\[61,90\].*包含第61帧，包含第90帧.*30f/);
+    assert.match(editor.segInfo.textContent, /帧 61-90 \(30f\) \(包含末尾帧\)/);
 });
 
 test("dragging refreshes metadata to match the new boundary without changing coverage", () => {
@@ -105,10 +105,10 @@ test("dragging refreshes metadata to match the new boundary without changing cov
     editor.isGlobalMode = () => false;
     editor.onMouseDown(mouse(300));
     editor.onMouseMove(mouse(420));
-    assert.match(editor.segInfo.textContent, /\[43,61\).*包含第43帧，不包含第61帧.*18f/);
+    assert.match(editor.segInfo.textContent, /帧 43-61 \(18f\) \(不包含末尾帧\)/);
     editor.onMouseUp();
-    assert.match(editor.segInfo.textContent, /\[43,61\).*18f/);
+    assert.match(editor.segInfo.textContent, /帧 43-61 \(18f\) \(不包含末尾帧\)/);
     assert.equal(ranges(editor), "0:42,42:18,60:30");
     editor._updateSegInfoFromSegment(editor.timeline.segments[0]);
-    assert.match(editor.segInfo.textContent, /\[1,43\).*不包含第43帧.*42f/);
+    assert.match(editor.segInfo.textContent, /帧 1-43 \(42f\) \(不包含末尾帧\)/);
 });
