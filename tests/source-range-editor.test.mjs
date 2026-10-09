@@ -91,6 +91,50 @@ test("a click still selects/toggles the split without committing a range change"
     assert.equal(ranges(editor), "0:30,30:30,60:30");
 });
 
+test("source split lines do not intercept clicks in the segment body", () => {
+    const { editor } = editorFixture();
+    assert.equal(editor.hitTest(303, 180).type, "split");
+    assert.equal(editor.hitTest(304, 180).type, "segment");
+    assert.equal(editor.hitTest(296, 180).type, "segment");
+    assert.equal(editor.hitTest(310, 180).type, "segment");
+    assert.equal(editor.hitTest(306, 34).type, "split", "the visible diamond remains clickable");
+    assert.equal(editor.hitTest(307, 34), null);
+});
+
+test("short source segments retain a selectable center when cut hit areas would overlap", () => {
+    for (const scale of [2, 1, 0.5]) {
+        const { editor } = editorFixture();
+        const [left, middle, right] = editor.timeline.segments;
+        middle.length = 4;
+        right.start = 34;
+        right.length = 56;
+        editor.getLayoutWidth = () => 90 * scale;
+        editor.frameToX = (frame) => frame * scale;
+        editor.xToFrame = (x) => Math.round(x / scale);
+        const centerX = (middle.start + middle.length / 2) * scale;
+        const hit = editor.hitTest(centerX, 180);
+        assert.equal(hit.type, "segment", `a ${4 * scale}px-wide segment must be selectable`);
+        assert.equal(hit.index, 1);
+        editor.onMouseDown(mouse(centerX));
+        editor.onMouseUp();
+        assert.equal(editor.selectedIndex, 1);
+        assert.equal(editor.selectedSplitFrame, null);
+        assert.equal(editor.commits, 0, "selecting a short segment must not change its range");
+        assert.equal(ranges(editor), "0:30,30:4,34:56");
+        assert.equal(editor.hitTest(left.length * scale, 180).type, "split");
+        assert.equal(editor.hitTest(right.start * scale, 180).type, "split");
+    }
+});
+
+test("generation modes retain their existing duration edge handles", () => {
+    const { editor } = editorFixture();
+    editor.isGenMode = () => true;
+    const hit = editor.hitTest(310, 180);
+    assert.equal(hit.type, "edge");
+    assert.equal(hit.index, 0);
+    assert.equal(hit.edge, "right");
+});
+
 test("source metadata states which cut frame is excluded and includes the final frame", () => {
     const { editor } = editorFixture();
     editor.isGlobalMode = () => false;

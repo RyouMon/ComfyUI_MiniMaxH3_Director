@@ -9256,6 +9256,17 @@ class MiniMaxH3DirectorEditor {
         const segs = this._previewSegments || this.timeline.segments;
         const phx = this.frameToX(this.currentFrame, width);
         const trackBottom = TRACK_Y + TRACK_H;
+        const sourceMode = !this.isFl2vMode() && !this.isGenMode() && !this.isImageBatch();
+        const sourceBoundaryPads = new Map();
+        if (sourceMode) {
+            for (const seg of segs) {
+                const end = seg.start + seg.length;
+                const pad = Math.abs(this.frameToX(end, width) - this.frameToX(seg.start, width)) / 4;
+                for (const frame of [seg.start, end]) {
+                    sourceBoundaryPads.set(frame, Math.min(sourceBoundaryPads.get(frame) ?? Infinity, pad));
+                }
+            }
+        }
 
         if (y <= RULER_H) {
             if (Math.abs(x - phx) <= HANDLE_PX) return { type: "playhead" };
@@ -9290,15 +9301,15 @@ class MiniMaxH3DirectorEditor {
             }
         }
 
-        // Split markers: label band + full track height, before segment/edge hits.
-        // (Previously label band returned null, so diamond clicks never registered.)
+        // Match the visible diamond/line, leaving the center of short source clips selectable.
         if (y >= RULER_H && y <= trackBottom) {
-            const hitPad = Math.max(HANDLE_PX, 12);
+            const maxHitPad = y < TRACK_Y ? 6 : 3;
             let best = null;
-            let bestDist = hitPad + 1;
+            let bestDist = Infinity;
             for (const frame of this.getEditableSplitFrames()) {
                 const sx = this.frameToX(frame, width);
                 const dist = Math.abs(x - sx);
+                const hitPad = Math.min(maxHitPad, sourceBoundaryPads.get(frame) ?? maxHitPad);
                 if (dist <= hitPad && dist < bestDist) {
                     bestDist = dist;
                     best = { type: "split", frame };
@@ -9319,8 +9330,10 @@ class MiniMaxH3DirectorEditor {
                     const seg = segs[i];
                     const x0 = this.frameToX(seg.start, width);
                     const x1 = this.frameToX(seg.start + seg.length, width);
-                    if (Math.abs(x - x0) <= HANDLE_PX) return { type: "edge", index: i, edge: "left" };
-                    if (Math.abs(x - x1) <= HANDLE_PX) return { type: "edge", index: i, edge: "right" };
+                    const leftPad = sourceMode ? Math.min(3, sourceBoundaryPads.get(seg.start) ?? 3) : HANDLE_PX;
+                    const rightPad = sourceMode ? Math.min(3, sourceBoundaryPads.get(seg.start + seg.length) ?? 3) : HANDLE_PX;
+                    if (Math.abs(x - x0) <= leftPad) return { type: "edge", index: i, edge: "left" };
+                    if (Math.abs(x - x1) <= rightPad) return { type: "edge", index: i, edge: "right" };
                 }
             }
         }
